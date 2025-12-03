@@ -95,3 +95,170 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+import os
+import gzip
+import pandas as pd
+import numpy as np
+import pickle
+import json
+
+from sklearn.compose import ColumnTransformer
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import GridSearchCV
+from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import precision_score
+from sklearn.metrics import recall_score
+from sklearn.metrics import f1_score
+from sklearn.metrics import balanced_accuracy_score
+from sklearn.metrics import confusion_matrix
+
+def load_dataset(path: str) -> pd.DataFrame:
+    return pd.read_csv(path, index_col=False, compression='zip')
+
+def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
+    new_df = df.copy()
+    new_df = new_df.rename(columns={'default payment next month': 'default'})
+    new_df = new_df.drop(columns=['ID'])
+    new_df = new_df.loc[new_df["MARRIAGE"] != 0]
+    new_df = new_df.loc[new_df["EDUCATION"] != 0]
+    new_df["EDUCATION"] = new_df["EDUCATION"].apply(lambda x: x if x < 4 else 4)
+    return new_df
+
+def create_pipeline(x: pd.DataFrame) -> Pipeline:
+    cat_features = ["SEX", "EDUCATION", "MARRIAGE"]
+    num_features = list(set(x) - set(cat_features))
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", MinMaxScaler(), num_features),
+            ('cat', OneHotEncoder(handle_unknown='ignore'), cat_features)
+        ],
+        remainder='passthrough'
+    )
+
+    return Pipeline(
+        steps=[
+                ('preprocessor', preprocessor), 
+                ("k_best", SelectKBest(f_classif)),
+                ("model", LogisticRegression(random_state=42))
+            ]
+        )
+
+def create_estimator(pipeline: Pipeline, x: pd.DataFrame) -> GridSearchCV:
+    param_grid = {
+	    "k_best__k": range(1, len(x.columns) + 1),
+	    "model__C": np.logspace(-3, 3, 7)
+    }
+
+    return GridSearchCV(
+        pipeline,
+        param_grid,
+        cv=10,
+        scoring='balanced_accuracy',
+        n_jobs=-1,
+        verbose=2,
+        refit=True
+    )
+
+def save_model(path: str, estimator: GridSearchCV):
+    with gzip.open(path, 'wb') as f:
+        pickle.dump(estimator, f)
+
+def calculate_precision_metrics(dataset_name: str, y, y_pred) -> dict: 
+    return {
+        'type': 'metrics',
+        'dataset': dataset_name,
+	    'precision': precision_score(y, y_pred, zero_division=0),
+	    'balanced_accuracy': balanced_accuracy_score(y, y_pred),
+	    'recall': recall_score(y, y_pred, zero_division=0),
+	    'f1_score': f1_score(y, y_pred, zero_division=0)
+    }
+
+def calculate_confusion_metrics(dataset_name: str, y, y_pred) -> dict:
+    cm = confusion_matrix(y, y_pred)
+    return {
+        'type': 'cm_matrix',
+	    'dataset': dataset_name,
+	    'true_0': {"predicted_0": int(cm[0][0]), "predicted_1": int(cm[0][1])},
+	    'true_1': {"predicted_0": int(cm[1][0]), "predicted_1": int(cm[1][1])}
+    }
+    
+def main():
+    import os
+# ... (otras importaciones)
+
+def main():
+    path1 = "./files/input/"
+    path2 = "./files/models/"
+    path_output = "./files/output/" # 🌟 Nueva variable para la ruta de salida
+
+    # 1. Crear el directorio de modelos si no existe
+    if not os.path.exists(path2):
+        os.makedirs(path2)
+        print(f"Directorio de modelos creado: {path2}")
+        
+    # 2. 🌟 Crear el directorio de salida si no existe
+    if not os.path.exists(path_output):
+        os.makedirs(path_output)
+        print(f"Directorio de salida creado: {path_output}")
+        
+    # Paso 1, Carga y limpieza de los datasets.
+    # ... (resto de tu código)
+
+    # Paso 1, Carga y limpieza de los datasets.
+    # Carga de los datasets.
+    test_df = load_dataset(os.path.join(path1, 'test_data.csv.zip'))
+    train_df = load_dataset(os.path.join(path1, 'train_data.csv.zip'))
+
+    # Limpieza de los datasets.
+    test_df = clean_dataset(test_df)
+    train_df = clean_dataset(train_df)
+
+    # Paso 2, División de los datasets.
+    x_test = test_df.drop(columns=['default'])
+    y_test = test_df['default']
+
+    x_train = train_df.drop(columns=['default'])
+    y_train = train_df['default']
+
+    # Paso 3, Creación del pipeline.
+    pipeline = create_pipeline(x_train)
+
+    # Paso 4, Optimización de los hiperparametros.
+    estimator = create_estimator(pipeline, x_train)
+    estimator.fit(x_train, y_train)
+
+    # Paso 5, Guardado del modelo
+    save_model(
+        os.path.join(path2, 'model.pkl.gz'),
+        estimator,
+    )
+
+    # Paso 6, Calcular las metricas de precisión
+    y_test_pred = estimator.predict(x_test)
+    test_precision_metrics = calculate_precision_metrics(
+        'test',
+        y_test,
+        y_test_pred
+    )
+    y_train_pred = estimator.predict(x_train)
+    train_precision_metrics = calculate_precision_metrics(
+        'train',
+        y_train,
+        y_train_pred
+    )
+
+    # Paso 7, Calcular metricas de confusión
+    test_confusion_metrics = calculate_confusion_metrics('test', y_test, y_test_pred)
+    train_confusion_metrics = calculate_confusion_metrics('train', y_train, y_train_pred)
+
+    with open('files/output/metrics.json', 'w') as file:
+        file.write(json.dumps(train_precision_metrics)+'\n')
+        file.write(json.dumps(test_precision_metrics)+'\n')
+        file.write(json.dumps(train_confusion_metrics)+'\n')
+        file.write(json.dumps(test_confusion_metrics)+'\n')
+
+if __name__ == "__main__":
+    main()
